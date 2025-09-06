@@ -1,52 +1,19 @@
-name: Build Celcat ICS
-
-on:
-  schedule:
-    - cron: "0 3 * * *"   # tous les jours 05:00 Paris
-  workflow_dispatch: {}
-
-permissions:
-  contents: write   # nécessaire pour git push
-
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Show repo tree (before)
-        run: |
-          pwd
-          ls -la
-          ls -la docs || true
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install deps
+      - name: Install deps (pin aiohttp 3.8.x)
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          python -c "import sys; print('Python', sys.version)"
-          python -c "import celcat_scraper, icalendar, pytz; print('Imports OK')"
-
-      - name: Generate ICS
-        env:
-          CELCAT_USERNAME: ${{ secrets.CELCAT_USERNAME }}
-          CELCAT_PASSWORD: ${{ secrets.CELCAT_PASSWORD }}
-        run: |
-          mkdir -p docs
-          python generate_ics.py
-          echo "----- docs content -----"
-          ls -la docs
-
-      - name: Commit ICS
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add docs/edt.ics
-          git commit -m "Update ICS" || echo "No changes to commit"
-          git push
+          # 1) Installer aiohttp 3.8.6 et NE PAS laisser celcat-scraper le ré-upgrader
+          pip install "aiohttp==3.8.6"
+          # 2) Installer celcat-scraper SANS dépendances (pour garder aiohttp 3.8.6)
+          pip install --no-deps "celcat-scraper==1.1.3"
+          # 3) Le reste
+          pip install "icalendar==5.0.12" "pytz==2024.1"
+          # 4) Sanity check
+          python - << 'PY'
+import aiohttp, sys
+print("aiohttp version:", aiohttp.__version__)
+try:
+    import celcat_scraper
+    print("celcat-scraper:", getattr(celcat_scraper, "__version__", "unknown"))
+except Exception as e:
+    print("celcat-scraper import failed:", e, file=sys.stderr)
+PY
