@@ -1,0 +1,3 @@
+celcat-scraper==1.1.3
+icalendar
+pytz
