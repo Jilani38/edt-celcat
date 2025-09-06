@@ -3,31 +3,38 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 import os, sys, traceback
 
+import aiohttp                         # <- POUR LE TIMEOUT OBJET
 from icalendar import Calendar, Event
 import pytz
 
+# --------- LIB CELCAT ----------
 try:
     from celcat_scraper import CelcatConfig, CelcatScraperAsync
 except Exception as e:
     print("ERREUR: celcat_scraper introuvable:", e)
     sys.exit(1)
+# -------------------------------
 
-# === PARAMÈTRES ===
-ENTITY_ID = "22304921"  # ton fid0 vu dans l'URL Celcat
+# ====== PARAMÈTRES UTILISATEUR ======
+ENTITY_ID = "22304921"                 # ton fid0 vu dans l’URL Celcat
 ENTITY_TYPES = ["student", "group", "class", "program"]  # on teste plusieurs
+
+# Certaines instances veulent la racine sans /calendar
 CANDIDATE_BASE_URLS = [
-    "https://services-web.cyu.fr",          # racine
-    "https://services-web.cyu.fr/calendar", # sous-chemin
+    "https://services-web.cyu.fr",
+    "https://services-web.cyu.fr/calendar",
 ]
+
 OUTPUT = Path("docs/edt.ics")
 TZ = pytz.timezone("Europe/Paris")
-# Fenêtre glissante: -14 jours → +180 jours
+
+# Fenêtre glissante : -14 jours → +180 jours
 today = date.today()
 START = today - timedelta(days=14)
 END   = today + timedelta(days=180)
-# ===================
-
+# =====================================
 def write_ics(events):
+    """Écrit toujours un ICS valide (placeholder si aucun évènement)."""
     cal = Calendar()
     cal.add("prodid", "-//EDT CYU Auto//celcat-scraper//")
     cal.add("version", "2.0")
@@ -45,15 +52,14 @@ def write_ics(events):
             if ev.get("category"):
                 title += f" [{ev['category']}]"
 
-            e = Event()
-            # dates
             start_dt = ev["start"]
-            end_dt = ev["end"]
+            end_dt   = ev["end"]
             if start_dt.tzinfo is None:
                 start_dt = TZ.localize(start_dt)
             if end_dt.tzinfo is None:
                 end_dt = TZ.localize(end_dt)
 
+            e = Event()
             e.add("summary", title)
             e.add("dtstart", start_dt)
             e.add("dtend",   end_dt)
@@ -80,11 +86,18 @@ def write_ics(events):
         f.write(cal.to_ical())
     print("Écrit:", OUTPUT)
 
+
 async def fetch_variant(base_url: str, etype: str, start: date, end: date, user: str, pwd: str):
-    """Essaie 2 stratégies de la lib; retourne (events, info_str)."""
-    cfg = CelcatConfig(url=base_url, username=user, password=pwd, include_holidays=True)
+    """Essaie deux stratégies selon la version de la lib, avec timeout objet."""
+    cfg = CelcatConfig(
+        url=base_url,
+        username=user,
+        password=pwd,
+        include_holidays=True,
+        timeout=aiohttp.ClientTimeout(total=45),  # <-- correctif timeout
+    )
     async with CelcatScraperAsync(cfg) as s:
-        # 1) méthode spécifique à l'entité (si dispo)
+        # 1) méthode spécifique à l’entité (si dispo)
         if hasattr(s, "get_calendar_events_for_entity"):
             try:
                 print(f"  -> try for_entity(type={etype}) @ {base_url}")
@@ -109,6 +122,7 @@ async def fetch_variant(base_url: str, etype: str, start: date, end: date, user:
 
     return [], None
 
+
 async def main():
     user = os.environ.get("CELCAT_USERNAME")
     pwd  = os.environ.get("CELCAT_PASSWORD")
@@ -132,7 +146,7 @@ async def main():
                     best_events = evs
                     chosen_info = info
             if best_events:
-                break
+                break  # on a trouvé quelque chose, on s'arrête
         except Exception as e:
             print("  (échec global sur cette base)", repr(e))
             traceback.print_exc(limit=1)
@@ -143,6 +157,7 @@ async def main():
         print("\nAucun évènement trouvé ❌ (auth/URL/type/ID). ICS placeholder généré.")
 
     write_ics(best_events)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
