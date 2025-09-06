@@ -2,16 +2,27 @@ name: Build Celcat ICS
 
 on:
   schedule:
-    - cron: "0 3 * * *"   # tous les jours à 03:00 UTC ≈ 05:00 à Paris
-  workflow_dispatch: {}    # bouton "Run workflow" manuel
+    - cron: "0 3 * * *"   # tous les jours 05:00 Paris
+  workflow_dispatch: {}
+
+permissions:
+  contents: write   # nécessaire pour git push
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Show repo tree (before)
+        run: |
+          pwd
+          ls -la
+          ls -la docs || true
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
@@ -19,18 +30,23 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          python -c "import sys; print('Python', sys.version)"
+          python -c "import celcat_scraper, icalendar, pytz; print('Imports OK')"
 
       - name: Generate ICS
         env:
           CELCAT_USERNAME: ${{ secrets.CELCAT_USERNAME }}
           CELCAT_PASSWORD: ${{ secrets.CELCAT_PASSWORD }}
         run: |
+          mkdir -p docs
           python generate_ics.py
+          echo "----- docs content -----"
+          ls -la docs
 
       - name: Commit ICS
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add docs/edt.ics
-          git commit -m "Update ICS" || echo "No changes"
+          git commit -m "Update ICS" || echo "No changes to commit"
           git push
