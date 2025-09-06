@@ -1,8 +1,7 @@
 import asyncio
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-import os
-import sys
+import os, sys, traceback
 
 from icalendar import Calendar, Event
 import pytz
@@ -13,22 +12,22 @@ except Exception as e:
     print("ERREUR: celcat_scraper introuvable:", e)
     sys.exit(1)
 
+# === PARAMÈTRES ===
+ENTITY_ID = "22304921"  # ton fid0 vu dans l'URL Celcat
+ENTITY_TYPES = ["student", "group", "class", "program"]  # on teste plusieurs
+CANDIDATE_BASE_URLS = [
+    "https://services-web.cyu.fr",          # racine
+    "https://services-web.cyu.fr/calendar", # sous-chemin
+]
 OUTPUT = Path("docs/edt.ics")
 TZ = pytz.timezone("Europe/Paris")
+# Fenêtre glissante: -14 jours → +180 jours
+today = date.today()
+START = today - timedelta(days=14)
+END   = today + timedelta(days=180)
+# ===================
 
-# ➜ TON ID (vu dans l’URL fid0=22304921)
-ENTITY_ID = "22304921"
-
-# ➜ On teste plusieurs types courants (selon la version Celcat/lib)
-ENTITY_TYPES = ["student", "group", "class", "program"]
-
-# ➜ On teste plusieurs bases (certaines instances veulent la racine sans /calendar)
-CANDIDATE_BASE_URLS = [
-    "https://services-web.cyu.fr",
-    "https://services-web.cyu.fr/calendar",
-]
-
-def build_calendar(events):
+def write_ics(events):
     cal = Calendar()
     cal.add("prodid", "-//EDT CYU Auto//celcat-scraper//")
     cal.add("version", "2.0")
@@ -47,7 +46,6 @@ def build_calendar(events):
                 title += f" [{ev['category']}]"
 
             e = Event()
-
             # dates
             start_dt = ev["start"]
             end_dt = ev["end"]
@@ -58,7 +56,7 @@ def build_calendar(events):
 
             e.add("summary", title)
             e.add("dtstart", start_dt)
-            e.add("dtend", end_dt)
+            e.add("dtend",   end_dt)
 
             rooms = ", ".join(ev.get("rooms") or [])
             sites = ", ".join(ev.get("sites") or [])
@@ -82,27 +80,32 @@ def build_calendar(events):
         f.write(cal.to_ical())
     print("Écrit:", OUTPUT)
 
-async def fetch_with(scraper, entity_type, start, end):
-    # Stratégie 1 : méthode dédiée à l’entité (si dispo)
-    if hasattr(scraper, "get_calendar_events_for_entity"):
-        try:
-            print(f"  -> get_calendar_events_for_entity(type={entity_type})")
-            evs = await scraper.get_calendar_events_for_entity(
-                entity_type=entity_type, entity_id=ENTITY_ID, start=start, end=end
-            )
-            return evs, f"for_entity:{entity_type}"
-        except Exception as e:
-            print("     (échec stratégie for_entity)", repr(e))
+async def fetch_variant(base_url: str, etype: str, start: date, end: date, user: str, pwd: str):
+    """Essaie 2 stratégies de la lib; retourne (events, info_str)."""
+    cfg = CelcatConfig(url=base_url, username=user, password=pwd, include_holidays=True)
+    async with CelcatScraperAsync(cfg) as s:
+        # 1) méthode spécifique à l'entité (si dispo)
+        if hasattr(s, "get_calendar_events_for_entity"):
+            try:
+                print(f"  -> try for_entity(type={etype}) @ {base_url}")
+                evs = await s.get_calendar_events_for_entity(
+                    entity_type=etype, entity_id=ENTITY_ID, start=start, end=end
+                )
+                return evs, f"for_entity:{etype} @ {base_url}"
+            except Exception as e:
+                print("     (échec for_entity)", repr(e))
+                traceback.print_exc(limit=1)
 
-    # Stratégie 2 : méthode générique avec params
-    try:
-        print(f"  -> get_calendar_events(entity_type={entity_type})")
-        evs = await scraper.get_calendar_events(
-            start=start, end=end, entity_type=entity_type, entity_id=ENTITY_ID
-        )
-        return evs, f"generic:{entity_type}"
-    except Exception as e:
-        print("     (échec stratégie generic)", repr(e))
+        # 2) méthode générique avec params
+        try:
+            print(f"  -> try generic(entity_type={etype}) @ {base_url}")
+            evs = await s.get_calendar_events(
+                start=start, end=end, entity_type=etype, entity_id=ENTITY_ID
+            )
+            return evs, f"generic:{etype} @ {base_url}"
+        except Exception as e:
+            print("     (échec generic)", repr(e))
+            traceback.print_exc(limit=1)
 
     return [], None
 
@@ -113,38 +116,33 @@ async def main():
         print("ERREUR: secrets CELCAT_USERNAME / CELCAT_PASSWORD manquants")
         sys.exit(1)
 
-    # Fenêtre glissante : -14j → +180j
-    today = date.today()
-    start = today - timedelta(days=14)
-    end   = today + timedelta(days=180)
-    print(f"Fenêtre demandée: {start} → {end}")
-    print(f"ID: {ENTITY_ID}")
+    print(f"Fenêtre: {START} → {END}")
+    print(f"ENTITY_ID: {ENTITY_ID}")
 
-    best = []
-    chosen = None
+    best_events = []
+    chosen_info = None
 
     for base in CANDIDATE_BASE_URLS:
-        print(f"\n=== Tentative base_url: {base}")
+        print(f"\n=== Base URL: {base}")
         try:
-            cfg = CelcatConfig(url=base, username=user, password=pwd, include_holidays=True)
-            async with CelcatScraperAsync(cfg) as s:
-                for etype in ENTITY_TYPES:
-                    evs, info = await fetch_with(s, etype, start, end)
-                    print(f"    {etype}: {len(evs)} évènement(s)")
-                    if len(evs) > len(best):
-                        best = evs
-                        chosen = f"{info} @ {base}"
-                if best:
-                    break  # on a trouvé quelque chose, on s'arrête
+            for etype in ENTITY_TYPES:
+                evs, info = await fetch_variant(base, etype, START, END, user, pwd)
+                print(f"    {etype}: {len(evs)} évènement(s)")
+                if len(evs) > len(best_events):
+                    best_events = evs
+                    chosen_info = info
+            if best_events:
+                break
         except Exception as e:
-            print("  (échec connexion/essai sur cette base)", repr(e))
+            print("  (échec global sur cette base)", repr(e))
+            traceback.print_exc(limit=1)
 
-    if best:
-        print(f"OK, retenu: {len(best)} évènement(s) via {chosen}")
+    if best_events:
+        print(f"\nOK ✅ {len(best_events)} évènement(s) via {chosen_info}")
     else:
-        print("Aucun évènement trouvé (auth/ID/url ?) → ICS placeholder.")
+        print("\nAucun évènement trouvé ❌ (auth/URL/type/ID). ICS placeholder généré.")
 
-    build_calendar(best)
+    write_ics(best_events)
 
 if __name__ == "__main__":
     asyncio.run(main())
