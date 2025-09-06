@@ -3,23 +3,22 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 import os, sys, traceback
 
-import aiohttp                         # <- POUR LE TIMEOUT OBJET
 from icalendar import Calendar, Event
 import pytz
+import aiohttp  # pour ClientTimeout
 
-# --------- LIB CELCAT ----------
+# ---------- LIB CELCAT ----------
 try:
     from celcat_scraper import CelcatConfig, CelcatScraperAsync
 except Exception as e:
     print("ERREUR: celcat_scraper introuvable:", e)
     sys.exit(1)
-# -------------------------------
+# --------------------------------
 
-# ====== PARAMÈTRES UTILISATEUR ======
-ENTITY_ID = "22304921"                 # ton fid0 vu dans l’URL Celcat
-ENTITY_TYPES = ["student", "group", "class", "program"]  # on teste plusieurs
+# ====== PARAMS ======
+ENTITY_ID = "22304921"  # ton fid0
+ENTITY_TYPES = ["student", "group", "class", "program"]
 
-# Certaines instances veulent la racine sans /calendar
 CANDIDATE_BASE_URLS = [
     "https://services-web.cyu.fr",
     "https://services-web.cyu.fr/calendar",
@@ -28,13 +27,15 @@ CANDIDATE_BASE_URLS = [
 OUTPUT = Path("docs/edt.ics")
 TZ = pytz.timezone("Europe/Paris")
 
-# Fenêtre glissante : -14 jours → +180 jours
+# Fenêtre glissante: -14 j → +180 j
 today = date.today()
 START = today - timedelta(days=14)
 END   = today + timedelta(days=180)
-# =====================================
+# ====================
+
+
 def write_ics(events):
-    """Écrit toujours un ICS valide (placeholder si aucun évènement)."""
+    """Toujours écrire un ICS valide (placeholder si vide)."""
     cal = Calendar()
     cal.add("prodid", "-//EDT CYU Auto//celcat-scraper//")
     cal.add("version", "2.0")
@@ -72,10 +73,8 @@ def write_ics(events):
                 e.add("location", loc)
 
             desc = []
-            if ev.get("department"):
-                desc.append(f"Département: {ev['department']}")
-            if profs:
-                desc.append(f"Prof(s): {profs}")
+            if ev.get("department"): desc.append(f"Département: {ev['department']}")
+            if profs: desc.append(f"Prof(s): {profs}")
             if desc:
                 e.add("description", "\n".join(desc))
 
@@ -87,17 +86,28 @@ def write_ics(events):
     print("Écrit:", OUTPUT)
 
 
+async def with_scraper(cfg: CelcatConfig):
+    """
+    Ouvre CelcatScraperAsync en essayant d'abord un timeout objet,
+    puis retombe sans timeout si la lib ne supporte pas ce paramètre.
+    """
+    try:
+        return CelcatScraperAsync(cfg, timeout=aiohttp.ClientTimeout(total=45))
+    except TypeError:
+        # versions qui n'acceptent pas 'timeout' dans CelcatScraperAsync
+        return CelcatScraperAsync(cfg)
+
+
 async def fetch_variant(base_url: str, etype: str, start: date, end: date, user: str, pwd: str):
-    """Essaie deux stratégies selon la version de la lib, avec timeout objet."""
+    """Teste 2 stratégies selon la version de la lib; retourne (events, info)."""
     cfg = CelcatConfig(
         url=base_url,
         username=user,
         password=pwd,
         include_holidays=True,
-        timeout=aiohttp.ClientTimeout(total=45),  # <-- correctif timeout
     )
-    async with CelcatScraperAsync(cfg) as s:
-        # 1) méthode spécifique à l’entité (si dispo)
+    async with (await with_scraper(cfg)) as s:
+        # 1) méthode spécifique à l'entité si dispo
         if hasattr(s, "get_calendar_events_for_entity"):
             try:
                 print(f"  -> try for_entity(type={etype}) @ {base_url}")
@@ -146,7 +156,7 @@ async def main():
                     best_events = evs
                     chosen_info = info
             if best_events:
-                break  # on a trouvé quelque chose, on s'arrête
+                break
         except Exception as e:
             print("  (échec global sur cette base)", repr(e))
             traceback.print_exc(limit=1)
