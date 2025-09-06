@@ -5,7 +5,6 @@ import os, sys, traceback
 
 from icalendar import Calendar, Event
 import pytz
-import aiohttp  # pour ClientTimeout
 
 # ---------- LIB CELCAT ----------
 try:
@@ -16,9 +15,10 @@ except Exception as e:
 # --------------------------------
 
 # ====== PARAMS ======
-ENTITY_ID = "22304921"  # ton fid0
-ENTITY_TYPES = ["student", "group", "class", "program"]
+ENTITY_ID = "22304921"  # ton fid0 (vu dans l’URL Celcat)
+ENTITY_TYPES = ["student", "group", "class", "program"]  # on teste plusieurs
 
+# Certaines instances veulent la racine sans /calendar
 CANDIDATE_BASE_URLS = [
     "https://services-web.cyu.fr",
     "https://services-web.cyu.fr/calendar",
@@ -86,18 +86,6 @@ def write_ics(events):
     print("Écrit:", OUTPUT)
 
 
-async def with_scraper(cfg: CelcatConfig):
-    """
-    Ouvre CelcatScraperAsync en essayant d'abord un timeout objet,
-    puis retombe sans timeout si la lib ne supporte pas ce paramètre.
-    """
-    try:
-        return CelcatScraperAsync(cfg, timeout=aiohttp.ClientTimeout(total=45))
-    except TypeError:
-        # versions qui n'acceptent pas 'timeout' dans CelcatScraperAsync
-        return CelcatScraperAsync(cfg)
-
-
 async def fetch_variant(base_url: str, etype: str, start: date, end: date, user: str, pwd: str):
     """Teste 2 stratégies selon la version de la lib; retourne (events, info)."""
     cfg = CelcatConfig(
@@ -106,7 +94,7 @@ async def fetch_variant(base_url: str, etype: str, start: date, end: date, user:
         password=pwd,
         include_holidays=True,
     )
-    async with (await with_scraper(cfg)) as s:
+    async with CelcatScraperAsync(cfg) as s:
         # 1) méthode spécifique à l'entité si dispo
         if hasattr(s, "get_calendar_events_for_entity"):
             try:
