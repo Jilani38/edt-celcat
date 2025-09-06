@@ -1,8 +1,9 @@
 import asyncio
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone  # <-- import complet ici
 from pathlib import Path
 import os
 import sys
+
 from icalendar import Calendar, Event
 import pytz
 
@@ -19,16 +20,17 @@ ENTITY_ID = "22304921"                               # <- ton fid0
 OUTPUT = Path("docs/edt.ics")
 TZ = pytz.timezone("Europe/Paris")
 
+
 async def main():
     user = os.environ.get("CELCAT_USERNAME")
-    pwd  = os.environ.get("CELCAT_PASSWORD")
+    pwd = os.environ.get("CELCAT_PASSWORD")
     if not user or not pwd:
         print("ERREUR: secrets CELCAT_USERNAME / CELCAT_PASSWORD manquants")
         sys.exit(1)
 
     # Fenêtre: aujourd'hui → +365j
     start = date.today()
-    end   = start + timedelta(days=365)
+    end = start + timedelta(days=365)
 
     print(f"Connexion à Celcat: {BASE_URL}")
     print(f"Entité: {ENTITY_TYPE} / {ENTITY_ID} | Période: {start} → {end}")
@@ -36,8 +38,7 @@ async def main():
     try:
         cfg = CelcatConfig(url=BASE_URL, username=user, password=pwd, include_holidays=True)
         async with CelcatScraperAsync(cfg) as s:
-            # 👉 certaines versions exposent get_calendar_events_for_entity ; d'autres filtrent via params
-            # Essai 1: méthode dédiée à l'entité
+            # Certaines versions exposent get_calendar_events_for_entity ; d'autres filtrent via params
             if hasattr(s, "get_calendar_events_for_entity"):
                 events = await s.get_calendar_events_for_entity(
                     entity_type=ENTITY_TYPE,
@@ -46,7 +47,6 @@ async def main():
                     end=end
                 )
             else:
-                # Essai 2: méthode générique + paramètres (selon la lib)
                 events = await s.get_calendar_events(
                     start=start,
                     end=end,
@@ -65,37 +65,55 @@ async def main():
     cal.add("version", "2.0")
 
     if not events:
-        from datetime import datetime, timedelta, timezone
+        # Placeholder pour éviter le 404 si aucune donnée
         now = datetime.now(timezone.utc)
         e = Event()
         e.add("summary", "EDT vide (placeholder)")
         e.add("dtstart", now)
-        e.add("dtend",   now + timedelta(minutes=30))
+        e.add("dtend", now + timedelta(minutes=30))
         cal.add_component(e)
     else:
         for ev in events:
             title = ev.get("course") or "Cours"
             if ev.get("category"):
                 title += f" [{ev['category']}]"
+
             e = Event()
             e.add("summary", title)
-            e.add("dtstart", TZ.localize(ev["start"]))
-            e.add("dtend",   TZ.localize(ev["end"]))
+
+            # Dates (naïves -> localisées Europe/Paris)
+            start_dt = ev["start"]
+            end_dt = ev["end"]
+            if start_dt.tzinfo is None:
+                start_dt = TZ.localize(start_dt)
+            if end_dt.tzinfo is None:
+                end_dt = TZ.localize(end_dt)
+
+            e.add("dtstart", start_dt)
+            e.add("dtend", end_dt)
+
             rooms = ", ".join(ev.get("rooms") or [])
             sites = ", ".join(ev.get("sites") or [])
             profs = ", ".join(ev.get("professors") or [])
-            loc = ", ".join([p for p in [rooms, sites] if p])
-            if loc: e.add("location", loc)
+            loc = ", ".join([p for p in (rooms, sites) if p])
+            if loc:
+                e.add("location", loc)
+
             desc = []
-            if ev.get("department"): desc.append(f"Département: {ev['department']}")
-            if profs: desc.append(f"Prof(s): {profs}")
-            if desc: e.add("description", "\n".join(desc))
+            if ev.get("department"):
+                desc.append(f"Département: {ev['department']}")
+            if profs:
+                desc.append(f"Prof(s): {profs}")
+            if desc:
+                e.add("description", "\n".join(desc))
+
             cal.add_component(e)
 
     OUTPUT.parent.mkdir(parents=True, exist_ok=True)
     with open(OUTPUT, "wb") as f:
         f.write(cal.to_ical())
     print("Écrit:", OUTPUT)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
